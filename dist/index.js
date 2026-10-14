@@ -40826,7 +40826,7 @@ async function validateSubscription() {
 }
 
 // src/main.ts
-var defaultVersion = "2.1.25";
+var defaultVersion = "2.1.26";
 function splitMilestone(version) {
   const match = /^(.+)-M(\d+)$/.exec(version);
   return match ? [match[1], parseInt(match[2], 10)] : [version, Number.MAX_SAFE_INTEGER];
