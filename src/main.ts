@@ -10,7 +10,7 @@ import * as tc from '@actions/tool-cache'
 import { compareVersions } from 'compare-versions'
 import { validateSubscription } from './subscription'
 
-const defaultVersion = '2.1.25'
+const defaultVersion = '2.1.26'
 
 // compare-versions doesn't know about Coursier milestone versions, like "2.1.25-M3",
 // which come *before* the corresponding release ("2.1.25"). Split those in two, so that
