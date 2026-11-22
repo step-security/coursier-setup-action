@@ -216,15 +216,6 @@ steps:
   - uses: step-security/coursier-setup-action@v3
 ```
 
-## Development
-
-```sh
-npm ci
-npm run all   # type-check, check formatting, lint, and bundle to dist/
-```
-
-`dist/` is rebuilt by CI once changes land on `main`, so pull requests should not include changes to it.
-
 ## License
 
 [MIT](LICENSE.md)

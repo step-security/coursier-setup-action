@@ -1,6 +1,6 @@
 {
   "name": "@step-security/coursier-setup-action",
-  "version": "3.0.2",
+  "version": "3.1.1",
   "private": true,
   "description": "GitHub Action that installs Coursier, a JVM, and JVM / Scala command-line tools",
   "scripts": {
