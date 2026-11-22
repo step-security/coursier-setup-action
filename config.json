@@ -1,0 +1,17 @@
+{
+  "$comment": "Managed automatically when syncing with upstream. Do not edit by hand.",
+  "schema_version": 1,
+  "onboarding_type": "copied",
+  "action_type": "node",
+  "upstream": {
+    "repository": "coursier/setup-action",
+    "synced_tag": "v3.1.1",
+    "synced_commit": "6eefb29fad2c9de9f52a5f2cef1154195c9d4609",
+    "archived": false
+  },
+  "build": {
+    "package_manager": "npm@11.12.1",
+    "node_version": "24",
+    "script": "package"
+  }
+}

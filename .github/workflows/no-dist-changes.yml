@@ -9,6 +9,7 @@ jobs:
     permissions:
       contents: read  # for actions/checkout to fetch code
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Harden the runner (Audit all outbound calls)
         uses: step-security/harden-runner@v2
