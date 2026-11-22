@@ -1,28 +1,39 @@
 {
-  "name": "coursier-setup-action",
+  "name": "@step-security/coursier-setup-action",
   "version": "3.0.2",
   "private": true,
-  "description": "Use Coursier to install JVM and Scala apps",
-  "main": "lib/main.js",
+  "description": "GitHub Action that installs Coursier, a JVM, and JVM / Scala command-line tools",
   "scripts": {
     "build": "tsc",
-    "format": "prettier --write **/*.ts",
-    "format-check": "prettier --check **/*.ts",
-    "lint": "eslint src/**/*.ts",
-    "package": "esbuild src/main.ts --bundle --platform=node --target=node24 --outfile=dist/index.js --sourcemap",
-    "all": "npm run build && npm run format-check && npm run lint && npm run package"
+    "format": "prettier --write \"**/*.ts\"",
+    "format-check": "prettier --check \"**/*.ts\"",
+    "lint": "eslint \"src/**/*.ts\"",
+    "package": "esbuild src/index.ts --bundle --platform=node --target=node24 --outfile=dist/index.js --sourcemap",
+    "test": "tsc -p tsconfig.test.json && esbuild \"src/*.test.ts\" --bundle --platform=node --target=node24 --outdir=test-build --log-level=warning && node --test \"test-build/*.test.js\"",
+    "all": "npm run build && npm run format-check && npm run lint && npm test && npm run package"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/step-security/coursier-setup-action.git"
   },
+  "homepage": "https://github.com/step-security/coursier-setup-action#readme",
+  "bugs": {
+    "url": "https://github.com/step-security/coursier-setup-action/issues"
+  },
   "keywords": [
     "actions",
-    "scala",
+    "github-actions",
     "coursier",
-    "setup"
+    "setup",
+    "scala",
+    "java",
+    "jvm",
+    "sbt",
+    "scalafmt",
+    "scala-cli"
   ],
   "author": "step-security",
+  "publisher": "step-security",
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^3.0.1",
@@ -32,15 +43,19 @@
     "compare-versions": "^6.1.1"
   },
   "devDependencies": {
-    "@stylistic/eslint-plugin": "^5.10.0",
-    "@types/node": "^26.6.3",
+    "@stylistic/eslint-plugin": "^6.0.0",
+    "@types/node": "^26.6.6",
     "@typescript-eslint/eslint-plugin": "^8.58.0",
-    "@typescript-eslint/parser": "^8.70.1",
+    "@typescript-eslint/parser": "^8.72.1",
     "esbuild": "^0.28.2",
-    "eslint": "^10.11.0",
-    "globals": "^17.12.0",
-    "prettier": "3.9.9",
+    "eslint": "^10.15.0",
+    "globals": "^17.14.0",
+    "prettier": "3.10.1",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.1"
+    "typescript-eslint": "^8.72.2"
+  },
+  "engines": {
+    "node": ">=24",
+    "npm": ">=11"
   }
 }

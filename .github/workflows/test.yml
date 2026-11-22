@@ -5,9 +5,17 @@ on:
     - main
   pull_request:
 
+# On main, only keep the run of the latest commit: a new push cancels the
+# in-progress run of the previous one. Other runs (PRs) each get their own
+# group, so they're never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -31,26 +39,38 @@ jobs:
       shell: bash -l {0}
       run: |
         npm ci
-        test "$OSTYPE" != "msys" || npm run format
         npm run all
 
-    # test extraJvmArgs — must run before the main setup so that apps and
-    # JVM are not yet cached, forcing cs to fetch over the network and hit
-    # the bogus proxy
+    # test extraJvmArgs — point coursier's cache (the coursier.cache Java
+    # property) to a fresh directory, then check that cs populated it. Fetching
+    # the JVM index always goes through that cache, so this succeeds only if the
+    # property actually reached cs, whatever the launcher (native -J flags,
+    # java -jar on Windows JVM launchers, or JAVA_TOOL_OPTIONS on Windows ARM64).
+    # This replaces an older negative test (bogus HTTPS proxy, expect failure),
+    # which also passed when the action failed for any unrelated reason.
+    # The path is relative to the workspace, to avoid Windows path quirks. It
+    # contains a space, which the multi-line form of extraJvmArgs allows. -Xmx
+    # checks that memory options are accepted (native launchers ignore them,
+    # see test-jvm-launchers for a check that they take effect).
     - name: Test extraJvmArgs passes args to cs
       uses: ./
       with:
         jvm: ${{ matrix.jvm }}
-        extraJvmArgs: -Dhttps.proxyHost=invalid.proxy.local -Dhttps.proxyPort=9999
-      continue-on-error: true
-      id: extra-jvm-args-test
-    - name: Verify extraJvmArgs caused failure
+        apps: ''
+        extraJvmArgs: |
+          -Xmx512m
+          -Dcoursier.cache=.ci-tmp/extra jvm args cache
+    - name: Verify extraJvmArgs changed the coursier cache location
       shell: bash
       run: |
-        if [ "${{ steps.extra-jvm-args-test.outcome }}" = "failure" ]; then
-          echo "extraJvmArgs correctly passed to cs (proxy caused expected failure)"
+        # the JVM index is index.json up to coursier 2.1.26, and
+        # indices-v2/<os>-<arch>.json since 2.1.27
+        index_dir=".ci-tmp/extra jvm args cache/https/github.com/coursier/jvm-index/raw/master"
+        if [ -n "$(find "$index_dir" -type f -name '*.json' 2>/dev/null)" ]; then
+          echo "extraJvmArgs correctly passed to cs (JVM index cached under the custom cache)"
         else
-          echo "::error::extraJvmArgs test should have failed with bogus proxy but didn't"
+          echo "::error::extraJvmArgs test: no JVM index found under $index_dir"
+          find .ci-tmp || true
           exit 1
         fi
 
@@ -72,6 +92,24 @@ jobs:
     - run: echo $JAVA_HOME
     - run: java -version
     - run: cs java -version
+    - name: Verify java-home output
+      shell: bash
+      env:
+        JAVA_HOME_OUTPUT: ${{ steps.cs-setup.outputs.java-home }}
+      run: |
+        test "$JAVA_HOME_OUTPUT" = "$JAVA_HOME"
+        "$JAVA_HOME_OUTPUT/bin/java" -version
+
+    # test cs-bin-dir output
+    - name: Verify cs-bin-dir output
+      shell: bash
+      env:
+        CS_BIN_DIR_OUTPUT: ${{ steps.cs-setup.outputs.cs-bin-dir }}
+      run: |
+        test -n "$CS_BIN_DIR_OUTPUT"
+        test "$CS_BIN_DIR_OUTPUT" = "$COURSIER_BIN_DIR"
+        ls "$CS_BIN_DIR_OUTPUT"
+        ls "$CS_BIN_DIR_OUTPUT" | grep -E '^amm(\.bat|\.exe)?$'
 
     # test installed apps
     - run: sbt "show name"
@@ -84,8 +122,49 @@ jobs:
     - run: amm --help
     - run: bloop about
 
+  # Apps pinned with app:version. scalafmt is a small JVM app (a .bat launcher
+  # on Windows), whose latest version is much newer than the pinned one.
+  test-app-versions:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    - uses: ./
+      with:
+        jvm: '17'
+        apps: scalafmt:3.8.3
+    - name: Verify the pinned scalafmt version is installed
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then version="$(scalafmt.bat --version)"; else version="$(scalafmt --version)"; fi
+        echo "$version"
+        version="${version//$'\r'/}"
+        if [ "$version" != "scalafmt 3.8.3" ]; then
+          echo "::error::expected scalafmt 3.8.3, got: $version"
+          exit 1
+        fi
+
   test-jvm-launchers:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:
@@ -125,11 +204,85 @@ jobs:
         apps: ''
 
     - run: echo cs-version=${{ steps.cs-setup-jvm-launcher.outputs.cs-version }}
+    - name: Verify default version output
+      shell: bash
+      run: |
+        expected="$(sed -n "s/^const defaultVersion = '\(.*\)'$/\1/p" src/main.ts)"
+        test -n "$expected"
+        test "${{ steps.cs-setup-jvm-launcher.outputs.cs-version }}" = "$expected"
     - run: cs --help
     - run: java -version
 
+    # test that extraJvmArgs JVM options reach the JVM running cs: the VM log
+    # file lists the JVM options cs was started with (the JVM doesn't create
+    # its parent directory)
+    - run: mkdir -p .ci-tmp
+      shell: bash
+    - name: Test extraJvmArgs passes JVM options to cs
+      uses: ./
+      with:
+        launcher: ${{ matrix.launcher }}
+        apps: ''
+        extraJvmArgs: -Xmx321m -XX:+UnlockDiagnosticVMOptions -XX:+LogVMOutput -XX:LogFile=.ci-tmp/cs-vm.log
+    - name: Verify extraJvmArgs JVM options took effect
+      shell: bash
+      run: |
+        if grep -q -- '-Xmx321m' .ci-tmp/cs-vm.log; then
+          echo "extraJvmArgs JVM options correctly passed to cs"
+        else
+          echo "::error::extraJvmArgs test: -Xmx321m not found in the VM log of cs"
+          cat .ci-tmp/cs-vm.log || true
+          exit 1
+        fi
+
+  test-invalid-java-home:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    # a stale JAVA_HOME should be ignored (with a warning), and a JVM installed instead
+    - id: cs-setup-invalid-java-home
+      uses: ./
+      env:
+        JAVA_HOME: ${{ runner.temp }}/no-such-jdk
+      with:
+        apps: ''
+
+    - name: Verify a working JVM was installed
+      shell: bash
+      env:
+        BOGUS_JAVA_HOME: ${{ runner.temp }}/no-such-jdk
+        OUTPUT_JAVA_HOME: ${{ steps.cs-setup-invalid-java-home.outputs.java-home }}
+      run: |
+        echo "java-home output: $OUTPUT_JAVA_HOME"
+        echo "JAVA_HOME: $JAVA_HOME"
+        test -n "$OUTPUT_JAVA_HOME"
+        test "$OUTPUT_JAVA_HOME" != "$BOGUS_JAVA_HOME"
+        test "$JAVA_HOME" = "$OUTPUT_JAVA_HOME"
+        java -version
+        "$JAVA_HOME/bin/java" -version
+
   test-nightly:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -157,11 +310,342 @@ jobs:
       uses: ./
       with:
         version: nightly
-        apps: ''
+        # multi-line value, to test splitting of apps on any whitespace
+        apps: |
+          ammonite
+          bloop
 
     - run: echo cs-version=${{ steps.cs-setup-nightly.outputs.cs-version }}
     - name: Verify nightly version output
       shell: bash
       run: |
-        test "${{ steps.cs-setup-nightly.outputs.cs-version }}" = "nightly"
+        version="${{ steps.cs-setup-nightly.outputs.cs-version }}"
+        test "$version" != "nightly"
+        [[ "$version" =~ ^[0-9]+\.[0-9]+ ]]
     - run: cs --help
+    - run: amm --help
+    - run: bloop about
+
+  test-mirrors:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    # Runners already have a JVM (JAVA_HOME), so only the app install hits Maven Central
+    - name: Test mirrors to a bogus host
+      uses: ./
+      with:
+        apps: scalafmt
+        mirrors: |
+          https://repo1.maven.org/maven2=https://bogus-mirror.invalid/maven2
+      continue-on-error: true
+      id: bogus-mirror-test
+    - name: Verify bogus mirror caused failure
+      shell: bash
+      run: |
+        if [ "${{ steps.bogus-mirror-test.outcome }}" != "failure" ]; then
+          echo "::error::installing apps should have failed with a bogus mirror but didn't"
+          exit 1
+        fi
+        # COURSIER_EXTRA_MIRRORS is exported to later steps: check the mirror is what breaks downloads
+        echo "COURSIER_EXTRA_MIRRORS=$COURSIER_EXTRA_MIRRORS"
+        if COURSIER_CACHE="$RUNNER_TEMP/cs-cache-bogus" cs fetch org.scala-lang:scala-library:2.13.14 > fetch.log 2>&1; then
+          cat fetch.log
+          echo "::error::cs fetch should have failed with a bogus mirror but didn't"
+          exit 1
+        fi
+        cat fetch.log
+        grep -q 'bogus-mirror\.invalid' fetch.log
+
+    - name: Test mirrors to an alternate Maven Central mirror
+      uses: ./
+      with:
+        apps: scalafmt
+        mirrors: |
+          https://repo1.maven.org/maven2=https://maven-central.storage-download.googleapis.com/maven2
+    - name: Verify alternate mirror is used
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then scalafmt.bat --version; else scalafmt --version; fi
+        COURSIER_CACHE="$RUNNER_TEMP/cs-cache-alt" cs fetch org.scala-lang:scala-library:2.13.14 2>&1 | tee fetch.log
+        grep -q 'maven-central\.storage-download\.googleapis\.com' fetch.log
+        if grep -q 'bogus-mirror\.invalid' fetch.log; then
+          echo "::error::mirror from the previous action run should have been replaced"
+          exit 1
+        fi
+
+  # Native launcher flavors, with launcher (required) or preferredLauncher.
+  # Only Linux has flavored native launchers (see the assets of
+  # https://github.com/coursier/coursier/releases/tag/v2.1.26): container,
+  # static and compat on x86_64, container and static on aarch64.
+  test-native-launcher-flavors:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            input: launcher
+            flavor: container
+          - os: ubuntu-latest
+            input: launcher
+            flavor: static
+          - os: ubuntu-latest
+            input: launcher
+            flavor: compat
+          - os: ubuntu-24.04-arm
+            input: launcher
+            flavor: container
+          - os: ubuntu-latest
+            input: preferredLauncher
+            flavor: static
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    - uses: ./
+      with:
+        launcher: ${{ matrix.input == 'launcher' && matrix.flavor || '' }}
+        preferredLauncher: ${{ matrix.input == 'preferredLauncher' && matrix.flavor || '' }}
+        apps: ''
+
+    - run: cs --help
+    - name: Verify the ${{ matrix.flavor }} launcher is the one on PATH
+      shell: bash
+      run: |
+        command -v cs
+        command -v cs | grep -F '/cs-launcher-${{ matrix.flavor }}/'
+
+  # Non-existent launcher flavors: preferredLauncher must fall back to the
+  # default launcher (with a warning), launcher must fail. macOS and Windows
+  # build different download URLs, and have no flavored launchers at all, so
+  # run there too.
+  test-missing-launcher-flavor:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    - uses: ./
+      with:
+        preferredLauncher: doesnotexist
+        apps: ''
+    - run: cs --help
+    - name: Verify the default launcher is the one on PATH
+      shell: bash
+      run: |
+        command -v cs
+        command -v cs | grep -E '/cs/[^/]+/[^/]+/cs$'
+
+    - uses: ./
+      with:
+        launcher: doesnotexist
+        apps: ''
+      continue-on-error: true
+      id: missing-launcher
+    - name: Verify missing launcher caused failure
+      shell: bash
+      run: |
+        if [ "${{ steps.missing-launcher.outcome }}" = "failure" ]; then
+          echo "launcher: doesnotexist correctly failed"
+        else
+          echo "::error::launcher: doesnotexist should have failed but didn't"
+          exit 1
+        fi
+
+    # A `uses:` step doesn't expose its log to later steps, so run the bundled
+    # action directly to check the fallback warning and the failure reason.
+    # GITHUB_PATH / GITHUB_ENV / GITHUB_OUTPUT point to scratch files, so that
+    # these runs don't affect later steps.
+    - name: Verify fallback warning and failure reason
+      shell: bash
+      env:
+        INPUT_USECONTAINERIMAGE: 'false'
+        INPUT_REQUIRECHECKSUM: 'false'
+        INPUT_DISABLEDEFAULTREPOS: 'false'
+      run: |
+        run_action() {
+          local name="$1"; shift
+          local dir=".ci-tmp/$name"
+          mkdir -p "$dir"
+          touch "$dir/path" "$dir/env" "$dir/output"
+          env GITHUB_PATH="$dir/path" GITHUB_ENV="$dir/env" GITHUB_OUTPUT="$dir/output" "$@" \
+            node dist/index.js > "$dir/log" 2>&1
+        }
+        check_log() {
+          # -q: echoing the matched ::warning:: / ::error:: lines would add annotations
+          if ! grep -qF "$2" ".ci-tmp/$1/log"; then
+            cat ".ci-tmp/$1/log"
+            echo "::error::'$2' not found in the output of the $1 run"
+            exit 1
+          fi
+          echo "Found expected output in the $1 run"
+        }
+
+        run_action preferred-fallback INPUT_PREFERREDLAUNCHER=doesnotexist || { cat .ci-tmp/preferred-fallback/log; exit 1; }
+        check_log preferred-fallback '::warning::Preferred Coursier launcher "doesnotexist" is not available (HTTP 404); falling back to the default launcher'
+
+        if run_action missing-launcher INPUT_LAUNCHER=doesnotexist; then
+          cat .ci-tmp/missing-launcher/log
+          echo "::error::launcher: doesnotexist should have failed but didn't"
+          exit 1
+        fi
+        check_log missing-launcher '::error::Unexpected HTTP response: 404'
+
+        if run_action unpinned-version INPUT_REQUIRECHECKSUM=true INPUT_VERSION=2.1.25; then
+          cat .ci-tmp/unpinned-version/log
+          echo "::error::requireChecksum: true with version: 2.1.25 should have failed but didn't"
+          exit 1
+        fi
+        check_log unpinned-version '::error::requireChecksum is enabled, but there are no pinned checksums for Coursier 2.1.25'
+
+  test-jvm-index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    # run first, so that nothing is cached yet (the index is needed anyway,
+    # even when the JVM is already in the cache)
+    - uses: ./
+      with:
+        jvm: '21'
+        jvm-index: https://github.com/coursier/jvm-index/raw/master/does-not-exist.json
+        apps: ''
+      continue-on-error: true
+      id: bogus-jvm-index
+    - name: Verify bogus jvm-index caused failure
+      shell: bash
+      run: |
+        if [ "${{ steps.bogus-jvm-index.outcome }}" = "failure" ]; then
+          echo "bogus jvm-index correctly failed"
+        else
+          echo "::error::bogus jvm-index should have failed but didn't"
+          exit 1
+        fi
+
+    # the default JVM index of coursier, passed explicitly
+    - uses: ./
+      with:
+        jvm: '21'
+        jvm-index: https://github.com/coursier/jvm-index/raw/master/index.json
+        apps: ''
+    - name: Verify JVM 21 is installed
+      shell: bash
+      run: |
+        echo "$JAVA_HOME"
+        java -version 2>&1 | grep -E 'version "21[."]'
+
+  test-custom-repositories:
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v7
+
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+        cache: 'npm'
+
+    - name: Build
+      shell: bash
+      run: |
+        npm ci
+        npm run package
+
+    # invalid boolean values must make the action fail rather than being
+    # silently treated as false
+    - name: Test invalid disableDefaultRepos value
+      uses: ./
+      with:
+        apps: ''
+        disableDefaultRepos: 'yes'
+      continue-on-error: true
+      id: invalid-disable-default-repos
+    - name: Verify invalid disableDefaultRepos value caused failure
+      shell: bash
+      run: |
+        if [ "${{ steps.invalid-disable-default-repos.outcome }}" = "failure" ]; then
+          echo "invalid disableDefaultRepos value correctly rejected"
+        else
+          echo "::error::disableDefaultRepos: 'yes' should have failed but didn't"
+          exit 1
+        fi
+
+    - id: cs-setup-custom-repos
+      uses: ./
+      with:
+        jvm: '17'
+        apps: scalafmt
+        disableDefaultRepos: true
+        # trailing | to check that empty entries are ignored
+        customRepositories: https://repo1.maven.org/maven2|https://central.sonatype.com/repository/maven-snapshots|
+
+    - run: java -version
+    - run: scalafmt --version
