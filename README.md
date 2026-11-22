@@ -2,7 +2,7 @@
 
 # Coursier setup GitHub Action
 
-[![Test](https://github.com/coursier/setup-action/actions/workflows/test.yml/badge.svg)](https://github.com/coursier/setup-action/actions/workflows/test.yml)
+[![](https://github.com/step-security/coursier-setup-action/actions/workflows/test.yml/badge.svg)](https://github.com/step-security/coursier-setup-action/actions/workflows/test.yml)
 
 A GitHub Action that installs [Coursier](https://get-coursier.io), then uses it to install a JVM and JVM / Scala command-line tools such as sbt, Scala CLI, Bloop or scalafmt.
 
